@@ -1,0 +1,368 @@
+import pandas as pd
+import datetime
+import random
+
+# --- 1. 定义传感器点位 (V1.3 - 已增加湿度) ---
+SENSOR_BEDROOM = "pir_bedroom"
+SENSOR_BATHROOM = "pir_bathroom"
+SENSOR_KITCHEN = "pir_kitchen"
+SENSOR_LIVING_ROOM = "pir_living_room"
+SENSOR_SOUND = "sound_sensor"
+SENSOR_HUMIDITY = "humidity_bathroom" # (新增) 规则7需要
+
+# --- 2. 模拟器核心功能 (V1.3) ---
+
+def generate_night_events(sleep_scenario="good_sleep"):
+    """模拟夜间 (00:00 - 06:00) 的睡眠事件。"""
+    events = []
+    base_time = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    if sleep_scenario == "good_sleep":
+        awakening_count = random.randint(0, 1)
+        print(f"[模拟器-夜间] 场景: good_sleep。 模拟 {awakening_count} 次卧室活动。")
+        # (新增 规则6 测试) 10% 概率去厨房喝水 (短时)
+        if random.random() < 0.1:
+            print("[模拟器-夜间] ...并模拟一次厨房喝水 (短时)。")
+            event_time = base_time + datetime.timedelta(minutes=random.randint(180, 240)) # 凌晨3-4点
+            events.append((event_time, SENSOR_KITCHEN, 1))
+            events.append((event_time + datetime.timedelta(minutes=2), SENSOR_KITCHEN, 0)) # 停留2分钟
+
+    elif sleep_scenario == "poor_sleep":
+        awakening_count = random.randint(5, 8)
+        print(f"[模拟器-夜间] 场景: poor_sleep。 模拟 {awakening_count} 次卧室活动。")
+    
+    # (新增 规则6)
+    elif sleep_scenario == "night_wandering_kitchen":
+        awakening_count = 0
+        print("[模拟器-夜间] 场景: night_wandering_kitchen。 模拟厨房长时活动。")
+        event_time = base_time + datetime.timedelta(minutes=random.randint(180, 210)) # 凌晨3:00-3:30
+        events.append((event_time, SENSOR_KITCHEN, 1))
+        events.append((event_time + datetime.timedelta(minutes=10), SENSOR_KITCHEN, 0)) # 停留10分钟
+
+    # (新增 规则6)
+    elif sleep_scenario == "night_wandering_livingroom":
+        awakening_count = 0
+        print("[模拟器-夜间] 场景: night_wandering_livingroom。 模拟客厅活动。")
+        event_time = base_time + datetime.timedelta(minutes=random.randint(180, 210))
+        events.append((event_time, SENSOR_LIVING_ROOM, 1))
+        events.append((event_time + datetime.timedelta(minutes=15), SENSOR_LIVING_ROOM, 0)) # 停留15分钟
+
+    # 模拟“清醒次数”（卧室内的活动）
+    for _ in range(awakening_count):
+        random_minute = random.randint(0, 6 * 60 - 1)
+        event_time = base_time + datetime.timedelta(minutes=random_minute)
+        events.append((event_time, SENSOR_BEDROOM, 1))
+        events.append((event_time + datetime.timedelta(minutes=1), SENSOR_BEDROOM, 0))
+    return events
+
+def generate_morning_events(morning_scenario="normal"):
+    """模拟早晨 (07:00 开始) 的事件。"""
+    events = []
+    current_time = datetime.datetime.now().replace(hour=7, minute=0, second=0, microsecond=0)
+    
+    events.append((current_time, SENSOR_BEDROOM, 1))
+    events.append((current_time + datetime.timedelta(minutes=1), SENSOR_BEDROOM, 0))
+    
+    enter_bathroom_time = current_time + datetime.timedelta(minutes=1, seconds=5)
+    events.append((enter_bathroom_time, SENSOR_BATHROOM, 1))
+    
+    if morning_scenario == "normal":
+        bathroom_duration = random.randint(10, 15)
+        print(f"[模拟器-早晨] 场景: normal。 卫生间停留 {bathroom_duration} 分钟。")
+        
+    elif morning_scenario == "anomaly_fall":
+        bathroom_duration = random.randint(45, 60)
+        print(f"[模拟器-早晨] 场景: anomaly_fall。 卫生间停留 {bathroom_duration} 分钟。")
+        sound_event_time = enter_bathroom_time + datetime.timedelta(seconds=30)
+        events.append((sound_event_time, SENSOR_SOUND, "LOUD_THUD"))
+        print(f"[模拟器-早晨] ...并模拟一次巨响。")
+        
+    # (新增 规则7)
+    elif morning_scenario == "normal_shower":
+        bathroom_duration = random.randint(35, 45) # 超过30分钟阈值
+        print(f"[模拟器-早晨] 场景: normal_shower。 卫生间停留 {bathroom_duration} 分钟。")
+        # 关键：同时模拟高湿度
+        humidity_event_time = enter_bathroom_time + datetime.timedelta(minutes=5)
+        events.append((humidity_event_time, SENSOR_HUMIDITY, 90)) # value=90%
+        print(f"[模拟器-早晨] ...并模拟高湿度。")
+    
+    leave_bathroom_time = enter_bathroom_time + datetime.timedelta(minutes=bathroom_duration)
+    events.append((leave_bathroom_time, SENSOR_BATHROOM, 0))
+
+    # 早餐活动 (摔倒或淋浴过久后，可能就没有早餐活动了)
+    if morning_scenario == "normal":
+        enter_kitchen_time = leave_bathroom_time + datetime.timedelta(seconds=10)
+        events.append((enter_kitchen_time, SENSOR_KITCHEN, 1))
+        kitchen_duration = random.randint(20, 30)
+        leave_kitchen_time = enter_kitchen_time + datetime.timedelta(minutes=kitchen_duration)
+        events.append((leave_kitchen_time, SENSOR_KITCHEN, 0))
+        print(f"[模拟器-早晨] 正常早餐。")
+        
+    return events
+
+def generate_afternoon_events(afternoon_scenario="normal"):
+    """模拟下午 (14:00 开始) 的事件。"""
+    events = []
+    base_time = datetime.datetime.now().replace(hour=14, minute=0, second=0, microsecond=0)
+
+    if afternoon_scenario == "normal":
+        print(f"[模拟器-下午] 场景: normal。 在客厅停留90分钟。")
+        events.append((base_time, SENSOR_LIVING_ROOM, 1))
+        events.append((base_time + datetime.timedelta(minutes=90), SENSOR_LIVING_ROOM, 0))
+
+    elif afternoon_scenario == "anxious_pacing":
+        print(f"[模拟器-下午] 场景: anxious_pacing。 在客厨间往复10次。")
+        current_time = base_time
+        for i in range(10): # 模拟10次来回
+            events.append((current_time, SENSOR_LIVING_ROOM, 1))
+            events.append((current_time + datetime.timedelta(minutes=random.randint(1, 3)), SENSOR_LIVING_ROOM, 0))
+            current_time += datetime.timedelta(minutes=random.randint(1, 3), seconds=10)
+            events.append((current_time, SENSOR_KITCHEN, 1))
+            events.append((current_time + datetime.timedelta(minutes=random.randint(1, 2)), SENSOR_KITCHEN, 0))
+            current_time += datetime.timedelta(minutes=random.randint(1, 2), seconds=10)
+
+    # (新增 规则5)
+    elif afternoon_scenario == "prolonged_sitting":
+        print(f"[模拟器-下午] 场景: prolonged_sitting。 在客厅停留5小时。")
+        events.append((base_time, SENSOR_LIVING_ROOM, 1))
+        events.append((base_time + datetime.timedelta(minutes=300), SENSOR_LIVING_ROOM, 0)) # 5 hours
+        # 注意：这个场景故意不生成任何其他活动 (厨房/浴室)
+            
+    return events
+
+
+# --- 3. (重大修改) V1.3 规则分析引擎 ---
+
+def analyze_events(data_df):
+    """
+    V1.3 规则检查器。
+    (重构) 第一遍：解析活动；第二遍：检查规则。
+    """
+    print(f"\n--- (V1.3) 开始分析数据 (共 {len(data_df)} 条事件) ---")
+
+    # --- 定义规则阈值 ---
+    # 规则 1
+    NIGHT_START_HOUR = 0
+    NIGHT_END_HOUR = 6
+    SLEEP_ALERT_THRESHOLD = 3 
+    # 规则 2 & 7
+    BATHROOM_ALERT_THRESHOLD = datetime.timedelta(minutes=30)
+    SHOWER_HUMIDITY_THRESHOLD = 80 # 湿度 > 80%
+    # 规则 3
+    BREAKFAST_CHECK_HOUR = 10
+    # 规则 4
+    ANXIETY_START_HOUR = 14
+    ANXIETY_END_HOUR = 17
+    ANXIETY_ALERT_THRESHOLD = 8
+    # 规则 5 (新增)
+    DAY_START_HOUR = 9
+    DAY_END_HOUR = 18
+    PROLONGED_SITTING_THRESHOLD = datetime.timedelta(hours=4)
+    # 规则 6 (新增)
+    DEEP_NIGHT_START = 1
+    DEEP_NIGHT_END = 5
+    NIGHT_KITCHEN_THRESHOLD = datetime.timedelta(minutes=5) # 夜间厨房活动阈值
+    
+    
+    # --- (重构) 步骤一: 将事件日志 (data_df) 解析为“活动列表” ---
+    activities = []
+    other_events = []
+    open_events = {} # 用于存储 {sensor_id: start_timestamp}
+
+    for _, event in data_df.iterrows():
+        sensor = event['sensor_id']
+        value = event['value']
+        ts = event['timestamp']
+
+        if value == 1:
+            open_events[sensor] = ts # 记录“进入”事件
+        elif value == 0:
+            if sensor in open_events:
+                start_ts = open_events.pop(sensor) # 匹配到“进入”
+                duration = ts - start_ts
+                activities.append({
+                    "location": sensor,
+                    "start": start_ts,
+                    "end": ts,
+                    "duration": duration
+                })
+        else:
+            # 存储非 0/1 事件 (如湿度, 声音)
+            other_events.append(event)
+            
+    print(f"[分析器-解析] 解析完成：找到 {len(activities)} 个完整活动, {len(other_events)} 个其他事件。")
+
+    # --- 步骤二: 遍历“活动列表”和“事件”，检查所有规则 ---
+
+    # 规则 1: 检查睡眠质量 (基于原始触发)
+    night_bedroom_triggers = data_df[
+        (data_df['sensor_id'] == SENSOR_BEDROOM) & (data_df['value'] == 1) &
+        (data_df['timestamp'].dt.hour >= NIGHT_START_HOUR) &
+        (data_df['timestamp'].dt.hour < NIGHT_END_HOUR)
+    ]
+    awakening_count = len(night_bedroom_triggers)
+    print(f"[分析器-规则1(睡眠)] 检测到夜间 (00-06点) 卧室活动: {awakening_count} 次")
+    if awakening_count > SLEEP_ALERT_THRESHOLD:
+        print(">> [警报!] 睡眠质量不佳，夜间频繁活动！")
+
+    # (修改) 规则 2 & 7: 检查浴室摔倒 (带“淋浴”抵消逻辑)
+    bathroom_activities = [a for a in activities if a["location"] == SENSOR_BATHROOM]
+    for act in bathroom_activities:
+        if act['duration'] > BATHROOM_ALERT_THRESHOLD:
+            # 停留过久，触发规则2。现在检查规则7 (抵消)
+            is_shower = False
+            for event in other_events:
+                if (event['sensor_id'] == SENSOR_HUMIDITY and 
+                    event['value'] >= SHOWER_HUMIDITY_THRESHOLD and
+                    act['start'] <= event['timestamp'] <= act['end']):
+                    is_shower = True
+                    break
+            
+            if is_shower:
+                print(f"[分析器-规则2/7(浴室)] 检测到停留: {act['duration']}，但湿度高。判定为 [淋浴]。")
+            else:
+                print(f">> [警报!] 卫生间停留时间过长: {act['duration']}，且无高湿度。可能摔倒！")
+
+    # 规则 3: 检查是否按时吃早餐 (基于原始触发)
+    latest_sim_time = data_df['timestamp'].max()
+    if latest_sim_time.hour >= BREAKFAST_CHECK_HOUR:
+        kitchen_triggers = data_df[
+            (data_df['sensor_id'] == SENSOR_KITCHEN) & (data_df['value'] == 1) &
+            (data_df['timestamp'].dt.hour > 6) &
+            (data_df['timestamp'].dt.hour < BREAKFAST_CHECK_HOUR)
+        ]
+        if len(kitchen_triggers) == 0:
+            print(">> [警报!] 截止10点，未检测到厨房活动！(可能错过早餐)")
+        else:
+             print(f"[分析器-规则3(早餐)] 正常：在10点前检测到厨房活动。")
+
+
+    # 规则 4: 检查焦躁/焦虑 (基于原始触发)
+    anxiety_triggers = data_df[
+        (data_df['sensor_id'].isin([SENSOR_KITCHEN, SENSOR_LIVING_ROOM])) &
+        (data_df['value'] == 1) &
+        (data_df['timestamp'].dt.hour >= ANXIETY_START_HOUR) &
+        (data_df['timestamp'].dt.hour < ANXIETY_END_HOUR)
+    ]
+    if not anxiety_triggers.empty:
+        movements_per_hour = anxiety_triggers.groupby(anxiety_triggers['timestamp'].dt.hour).size()
+        if (movements_per_hour > ANXIETY_ALERT_THRESHOLD).any():
+            print(f"[分析器-规则4(焦躁)] 下午时段活动频次: {movements_per_hour.to_dict()}")
+            print(">> [警报!] 检测到下午时段活动频率异常高（可能焦躁）！")
+        else:
+            print(f"[分析器-规则4(焦躁)] 下午时段活动正常。")
+            
+    # (新增) 规则 5: 长时间静坐/失能
+    daytime_living_activities = [a for a in activities if 
+                                 a["location"] == SENSOR_LIVING_ROOM and
+                                 DAY_START_HOUR <= a['start'].hour < DAY_END_HOUR]
+    for act in daytime_living_activities:
+        if act['duration'] > PROLONGED_SITTING_THRESHOLD:
+            # 检查此期间是否有其他活动 (如去浴室)
+            other_activity_found = False
+            for other_act in activities:
+                if (other_act['location'] != SENSOR_LIVING_ROOM and
+                    act['start'] < other_act['start'] < act['end']):
+                    other_activity_found = True
+                    break
+            if not other_activity_found:
+                 print(f">> [警报!] 白天在客厅长时间静止: {act['duration']}，且无其他活动！")
+            else:
+                 print(f"[分析器-规则5(静坐)] 在客厅停留 {act['duration']}，但期间有其他活动。")
+                 
+    # (新增) 规则 6: 夜间游荡 (基于您的精细逻辑)
+    deep_night_activities = [a for a in activities if 
+                             DEEP_NIGHT_START <= a['start'].hour < DEEP_NIGHT_END]
+    
+    found_rule6 = False
+    for act in deep_night_activities:
+        if act['location'] == SENSOR_LIVING_ROOM:
+            print(f">> [警报!] 夜间游荡 (高风险): 在客厅停留 {act['duration']}。")
+            found_rule6 = True
+        elif act['location'] == SENSOR_KITCHEN:
+            if act['duration'] > NIGHT_KITCHEN_THRESHOLD:
+                print(f">> [警报!] 夜间厨房活动异常 (中风险): 停留 {act['duration']}。")
+            else:
+                print(f"[分析器-规则6(夜间)] 检测到夜间厨房短时活动: {act['duration']}。判定为 [正常 (喝水)]。")
+            found_rule6 = True
+            
+    if not found_rule6:
+        print(f"[分析器-规则6(夜间)] 深度睡眠时段 (01-05点) 无客厅或厨房活动。")
+
+
+# --- 4. 运行模拟 (V1.3) ---
+
+def run_full_simulation(name, sleep, morning, afternoon):
+    """辅助函数：用于运行完整的一天模拟"""
+    print("\n" + "="*40)
+    print(f"--- 场景: {name} ---")
+    print(f"--- (Config: {sleep}, {morning}, {afternoon}) ---")
+    print("="*40)
+    
+    night_data = generate_night_events(sleep_scenario=sleep)
+    morning_data = generate_morning_events(morning_scenario=morning)
+    afternoon_data = generate_afternoon_events(afternoon_scenario=afternoon)
+    
+    full_data = pd.DataFrame(night_data + morning_data + afternoon_data, 
+                             columns=["timestamp", "sensor_id", "value"])
+    
+    if full_data.empty:
+        print("未生成任何事件。")
+        return
+        
+    full_data['timestamp'] = pd.to_datetime(full_data['timestamp']) 
+    full_data = full_data.sort_values(by="timestamp").reset_index(drop=True)
+    
+    print("\n[模拟数据概览]:")
+    print(full_data.to_markdown(index=False))
+    
+    analyze_events(full_data)
+
+
+# --- 场景1: 完全正常 (V1.3 - 包含喝水测试) ---
+run_full_simulation(
+    name="完全正常",
+    sleep="good_sleep", 
+    morning="normal", 
+    afternoon="normal"
+)
+
+# --- 场景2: 复合型异常 (摔倒+焦躁) ---
+run_full_simulation(
+    name="复合异常 (摔倒+焦躁)",
+    sleep="poor_sleep", 
+    morning="anomaly_fall", 
+    afternoon="anxious_pacing"
+)
+
+# --- 场景3: (新增) 测试 规则7 (淋浴抵消) ---
+run_full_simulation(
+    name="测试 规则7 (淋浴)",
+    sleep="good_sleep", 
+    morning="normal_shower", # <--- 测试点
+    afternoon="normal"
+)
+
+# --- 场景4: (新增) 测试 规则 5 (长时间静坐) ---
+run_full_simulation(
+    name="测试 规则 5 (静坐)",
+    sleep="good_sleep", 
+    morning="normal", 
+    afternoon="prolonged_sitting" # <--- 测试点
+)
+
+# --- 场景5: (新增) 测试 规则 6 (夜间游荡-厨房) ---
+run_full_simulation(
+    name="测试 规则 6 (夜间游荡-厨房)",
+    sleep="night_wandering_kitchen", # <--- 测试点
+    morning="normal", 
+    afternoon="normal"
+)
+
+# --- 场景6: (新增) 测试 规则 6 (夜间游荡-客厅) ---
+run_full_simulation(
+    name="测试 规则 6 (夜间游荡-客厅)",
+    sleep="night_wandering_livingroom", # <--- 测试点
+    morning="normal", 
+    afternoon="normal"
+)
