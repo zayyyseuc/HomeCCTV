@@ -1,0 +1,205 @@
+import flask
+from flask import Flask, request, jsonify
+import json
+import datetime
+import pandas as pd
+import numpy as np
+import os
+from collections import deque
+import threading
+import matplotlib.pyplot as plt
+
+app = Flask(__name__)
+
+# 全局变量
+sensor_data = deque(maxlen=10000)  # 存储10000条数据
+collection_active = True
+dataframe = None
+
+# 节点配置
+NODE_CONFIG = {
+    'node_001': {'x': 0, 'y': 0, 'room': 'living_room'},
+    'node_002': {'x': 5, 'y': 0, 'room': 'kitchen'},
+    'node_003': {'x': 0, 'y': 4, 'room': 'bedroom'},
+    'node_004': {'x': 5, 'y': 4, 'room': 'bathroom'}
+}
+
+@app.route('/data', methods=['POST'])
+def receive_data():
+    """接收传感器数据"""
+    global sensor_data
+    
+    try:
+        data = request.get_json()
+        data['received_time'] = datetime.datetime.now().isoformat()
+        data['timestamp'] = datetime.datetime.now().timestamp()
+        
+        # 添加房间信息
+        node_id = data.get('node_id')
+        if node_id in NODE_CONFIG:
+            data['room'] = NODE_CONFIG[node_id]['room']
+        
+        sensor_data.append(data)
+        
+        print(f"Received data from {node_id}: ({data['x']:.2f}, {data['y']:.2f})")
+        
+        return jsonify({"status": "success", "count": len(sensor_data)})
+    
+    except Exception as e:
+        print(f"Error receiving data: {e}")
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    """获取采集状态"""
+    return jsonify({
+        "data_count": len(sensor_data),
+        "collection_active": collection_active,
+        "nodes": list(NODE_CONFIG.keys())
+    })
+
+@app.route('/start_collection', methods=['POST'])
+def start_collection():
+    """开始数据采集"""
+    global collection_active
+    collection_active = True
+    return jsonify({"status": "started"})
+
+@app.route('/stop_collection', methods=['POST'])
+def stop_collection():
+    """停止数据采集"""
+    global collection_active
+    collection_active = False
+    return jsonify({"status": "stopped"})
+
+@app.route('/save_dataset', methods=['POST'])
+def save_dataset():
+    """保存数据集为CSV文件"""
+    try:
+        if len(sensor_data) == 0:
+            return jsonify({"error": "No data to save"}), 400
+        
+        # 创建数据集目录
+        os.makedirs('datasets', exist_ok=True)
+        
+        # 准备数据
+        filename = f"datasets/sensor_data_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        df = prepare_dataset()
+        df.to_csv(filename, index=False)
+        
+        # 生成数据统计
+        stats = generate_data_stats(df)
+        
+        return jsonify({
+            "status": "saved", 
+            "filename": filename,
+            "records": len(df),
+            "statistics": stats
+        })
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/clear_data', methods=['POST'])
+def clear_data():
+    """清空数据"""
+    global sensor_data
+    sensor_data.clear()
+    return jsonify({"status": "cleared", "count": 0})
+
+def prepare_dataset():
+    """准备训练数据集"""
+    records = []
+    
+    for data in sensor_data:
+        record = {
+            'timestamp': data.get('timestamp', 0),
+            'node_id': data.get('node_id', ''),
+            'distance': data.get('distance', 0),
+            'angle': data.get('angle', 0),
+            'x': data.get('x', 0),
+            'y': data.get('y', 0),
+            'presence': data.get('presence', 0),
+            'confidence': data.get('confidence', 0),
+            'node_x': data.get('node_x', 0),
+            'node_y': data.get('node_y', 0),
+            'room': data.get('room', 'unknown'),
+            'received_time': data.get('received_time', '')
+        }
+        records.append(record)
+    
+    return pd.DataFrame(records)
+
+def generate_data_stats(df):
+    """生成数据统计信息"""
+    if len(df) == 0:
+        return {}
+    
+    stats = {
+        'total_records': len(df),
+        'time_range': {
+            'start': df['received_time'].min(),
+            'end': df['received_time'].max()
+        },
+        'nodes': df['node_id'].unique().tolist(),
+        'rooms': df['room'].unique().tolist(),
+        'presence_ratio': df['presence'].mean(),
+        'avg_confidence': df['confidence'].mean(),
+        'coverage_area': {
+            'x_min': df['x'].min(),
+            'x_max': df['x'].max(),
+            'y_min': df['y'].min(),
+            'y_max': df['y'].max()
+        }
+    }
+    
+    return stats
+
+def real_time_visualization():
+    """实时数据可视化（可选）"""
+    plt.ion()
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    while True:
+        if len(sensor_data) > 0:
+            # 清空图形
+            ax1.clear()
+            ax2.clear()
+            
+            # 准备最新数据
+            recent_data = list(sensor_data)[-100:]  # 最近100个点
+            
+            # 轨迹图
+            x_vals = [d.get('x', 0) for d in recent_data]
+            y_vals = [d.get('y', 0) for d in recent_data]
+            presence = [d.get('presence', 0) for d in recent_data]
+            
+            ax1.scatter(x_vals, y_vals, c=presence, cmap='coolwarm', alpha=0.6)
+            ax1.set_title('Real-time Position Tracking')
+            ax1.set_xlabel('X Coordinate')
+            ax1.set_ylabel('Y Coordinate')
+            ax1.grid(True, alpha=0.3)
+            
+            # 数据统计
+            ax2.bar(['Total', 'Presence', 'Avg Conf'], 
+                   [len(sensor_data), sum(presence), np.mean([d.get('confidence', 0) for d in recent_data])])
+            ax2.set_title('Data Statistics')
+            
+            plt.tight_layout()
+            plt.pause(1.0)
+
+if __name__ == '__main__':
+    # 可选：启动实时可视化（在单独线程中）
+    # vis_thread = threading.Thread(target=real_time_visualization, daemon=True)
+    # vis_thread.start()
+    
+    print("数据采集服务器启动...")
+    print("端点:")
+    print("  POST /data - 接收传感器数据")
+    print("  GET  /status - 获取状态")
+    print("  POST /start_collection - 开始采集")
+    print("  POST /stop_collection - 停止采集")
+    print("  POST /save_dataset - 保存数据集")
+    print("  POST /clear_data - 清空数据")
+    
+    app.run(host='0.0.0.0', port=5000, debug=False)
