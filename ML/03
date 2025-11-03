@@ -1,0 +1,319 @@
+import flask
+from flask import Flask, request, jsonify
+import json
+import datetime
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow import keras
+import joblib
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+import matplotlib.animation as animation
+from collections import deque
+import threading
+import time
+
+app = Flask(__name__)
+
+# 全局变量
+sensor_data = deque(maxlen=1000)
+predictions = deque(maxlen=100)
+model = None
+scaler = None
+is_initialized = False
+
+# 活动类型定义
+ACTIVITY_LABELS = {
+    0: '静止',
+    1: '行走', 
+    2: '跑步',
+    3: '工作',
+    4: '休息',
+    5: '社交'
+}
+
+# 六维生活指数定义
+LIFE_INDICES = ['活动量', '规律性', '社交性', '休息质量', '环境适应', '健康指数']
+
+class RealTimePredictor:
+    def __init__(self, model_path, scaler_path):
+        self.model = keras.models.load_model(model_path)
+        self.scaler = joblib.load(scaler_path)
+        self.feature_window = deque(maxlen=10)  # 10个时间点的特征窗口
+        self.prediction_history = deque(maxlen=50)
+    
+    def extract_features(self, data_point):
+        """从单个数据点提取特征（简化版）"""
+        features = [
+            data_point.get('distance', 0),
+            data_point.get('angle', 0),
+            data_point.get('x', 0),
+            data_point.get('y', 0),
+            data_point.get('presence', 0),
+            data_point.get('confidence', 0)
+        ]
+        return np.array(features)
+    
+    def predict(self, current_data):
+        """实时预测"""
+        # 提取特征
+        features = self.extract_features(current_data)
+        self.feature_window.append(features)
+        
+        if len(self.feature_window) < 5:  # 需要至少5个点
+            return None
+        
+        # 创建时间窗口特征
+        window_features = np.array(self.feature_window).flatten()
+        
+        # 标准化并预测
+        features_scaled = self.scaler.transform([window_features])
+        prediction = self.model.predict(features_scaled, verbose=0)[0]
+        
+        # 获取预测结果
+        predicted_class = np.argmax(prediction)
+        confidence = np.max(prediction)
+        
+        result = {
+            'activity': ACTIVITY_LABELS.get(predicted_class, '未知'),
+            'confidence': float(confidence),
+            'timestamp': datetime.datetime.now().isoformat(),
+            'position': (current_data.get('x', 0), current_data.get('y', 0))
+        }
+        
+        self.prediction_history.append(result)
+        return result
+    
+    def calculate_life_indices(self, window_size=10):
+        """计算六维生活指数"""
+        if len(self.prediction_history) < window_size:
+            return [50] * 6  # 默认值
+        
+        recent_predictions = list(self.prediction_history)[-window_size:]
+        
+        # 简化计算（实际需要更复杂的算法）
+        activity_types = [list(ACTIVITY_LABELS.keys())[list(ACTIVITY_LABELS.values()).index(p['activity'])] 
+                         for p in recent_predictions if p['activity'] in ACTIVITY_LABELS.values()]
+        
+        if not activity_types:
+            return [50] * 6
+        
+        # 模拟六维指数计算
+        indices = [
+            min(100, len(activity_types) * 10),  # 活动量
+            min(100, 100 - np.std(activity_types) * 5),  # 规律性
+            min(100, activity_types.count(5) * 20),  # 社交性
+            min(100, activity_types.count(4) * 25),  # 休息质量
+            75,  # 环境适应（简化）
+            min(100, np.mean([p['confidence'] for p in recent_predictions]) * 100)  # 健康指数
+        ]
+        
+        return indices
+
+class ActivityVisualizer:
+    def __init__(self):
+        self.fig = plt.figure(figsize=(15, 8))
+        self.setup_layout()
+        self.last_update = time.time()
+    
+    def setup_layout(self):
+        gs = GridSpec(2, 3, figure=self.fig)
+        
+        # 活动轨迹图
+        self.ax_trajectory = self.fig.add_subplot(gs[0, 0])
+        self.ax_trajectory.set_title('人员活动轨迹图')
+        self.ax_trajectory.set_xlabel('X坐标 (米)')
+        self.ax_trajectory.set_ylabel('Y坐标 (米)')
+        self.ax_trajectory.grid(True, alpha=0.3)
+        
+        # 六维雷达图
+        self.ax_radar = self.fig.add_subplot(gs[0, 1], polar=True)
+        
+        # 实时活动显示
+        self.ax_activity = self.fig.add_subplot(gs[0, 2])
+        self.ax_activity.set_title('实时活动识别')
+        
+        # 历史活动统计
+        self.ax_stats = self.fig.add_subplot(gs[1, 0])
+        self.ax_stats.set_title('活动统计')
+        
+        # 置信度趋势
+        self.ax_confidence = self.fig.add_subplot(gs[1, 1])
+        self.ax_confidence.set_title('预测置信度')
+        
+        # 系统状态
+        self.ax_status = self.fig.add_subplot(gs[1, 2])
+        self.ax_status.set_title('系统状态')
+        self.ax_status.axis('off')
+    
+    def update_display(self, predictor, sensor_count):
+        """更新所有显示"""
+        current_time = time.time()
+        if current_time - self.last_update < 1.0:  # 限制更新频率
+            return
+        
+        self.last_update = current_time
+        
+        try:
+            # 清空所有图形
+            for ax in [self.ax_trajectory, self.ax_activity, self.ax_stats, 
+                      self.ax_confidence, self.ax_radar]:
+                ax.clear()
+            
+            # 1. 更新轨迹图
+            if predictor.prediction_history:
+                positions = [p['position'] for p in predictor.prediction_history if p['position'] != (0, 0)]
+                if positions:
+                    x_vals = [p[0] for p in positions]
+                    y_vals = [p[1] for p in positions]
+                    
+                    self.ax_trajectory.scatter(x_vals, y_vals, alpha=0.6, 
+                                             c=range(len(x_vals)), cmap='viridis')
+                    if len(x_vals) > 1:
+                        self.ax_trajectory.plot(x_vals, y_vals, 'b-', alpha=0.3)
+                    self.ax_trajectory.scatter(x_vals[-1], y_vals[-1], c='red', s=100)
+            
+            self.ax_trajectory.set_title('人员活动轨迹图')
+            self.ax_trajectory.grid(True, alpha=0.3)
+            
+            # 2. 更新六维雷达图
+            life_indices = predictor.calculate_life_indices()
+            self.update_radar_chart(life_indices)
+            
+            # 3. 更新活动显示
+            if predictor.prediction_history:
+                current_activity = predictor.prediction_history[-1]
+                activities = [p['activity'] for p in predictor.prediction_history]
+                activity_counts = pd.Series(activities).value_counts()
+                
+                self.ax_activity.bar(activity_counts.index, activity_counts.values)
+                self.ax_activity.set_title(f'当前活动: {current_activity["activity"]}')
+                self.ax_activity.tick_params(axis='x', rotation=45)
+            
+            # 4. 更新统计信息
+            self.ax_status.clear()
+            self.ax_status.axis('off')
+            status_text = f"""系统状态:
+数据点数: {sensor_count}
+活动识别: {len(predictor.prediction_history)}
+最后更新: {datetime.datetime.now().strftime('%H:%M:%S')}
+模型状态: {'运行中' if predictor else '未初始化'}"""
+            self.ax_status.text(0.1, 0.9, status_text, transform=self.ax_status.transAxes, 
+                               fontsize=10, verticalalignment='top')
+            
+            plt.tight_layout()
+            plt.pause(0.01)
+            
+        except Exception as e:
+            print(f"可视化更新错误: {e}")
+    
+    def update_radar_chart(self, scores):
+        """更新六维雷达图"""
+        categories = LIFE_INDICES
+        N = len(categories)
+        
+        angles = [n / float(N) * 2 * np.pi for n in range(N)]
+        angles += angles[:1]
+        
+        scores = list(scores)
+        scores += scores[:1]
+        
+        self.ax_radar.clear()
+        self.ax_radar.set_theta_offset(np.pi / 2)
+        self.ax_radar.set_theta_direction(-1)
+        
+        self.ax_radar.set_xticks(angles[:-1])
+        self.ax_radar.set_xticklabels(categories)
+        
+        self.ax_radar.plot(angles, scores, 'o-', linewidth=2)
+        self.ax_radar.fill(angles, scores, alpha=0.25)
+        self.ax_radar.set_ylim(0, 100)
+        self.ax_radar.set_title('六维生活指数', size=12, y=1.1)
+        
+        for angle, score, label in zip(angles[:-1], scores[:-1], categories):
+            self.ax_radar.text(angle, score + 5, f'{score:.0f}', 
+                             ha='center', va='center', fontsize=8)
+
+# 全局预测器和可视化器
+predictor = None
+visualizer = None
+
+@app.route('/data', methods=['POST'])
+def receive_data():
+    """接收实时数据并进行预测"""
+    global sensor_data, predictor
+    
+    try:
+        data = request.get_json()
+        data['received_time'] = datetime.datetime.now().isoformat()
+        sensor_data.append(data)
+        
+        # 实时预测
+        if predictor and is_initialized:
+            prediction = predictor.predict(data)
+            if prediction:
+                return jsonify({
+                    "status": "processed", 
+                    "prediction": prediction,
+                    "life_indices": predictor.calculate_life_indices()
+                })
+        
+        return jsonify({"status": "received"})
+    
+    except Exception as e:
+        print(f"预测错误: {e}")
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/initialize', methods=['POST'])
+def initialize_system():
+    """初始化预测系统"""
+    global predictor, visualizer, is_initialized
+    
+    try:
+        model_path = request.json.get('model_path', 'models/activity_model.h5')
+        scaler_path = request.json.get('scaler_path', 'models/scaler.pkl')
+        
+        predictor = RealTimePredictor(model_path, scaler_path)
+        visualizer = ActivityVisualizer()
+        is_initialized = True
+        
+        # 启动可视化更新线程
+        vis_thread = threading.Thread(target=update_visualization, daemon=True)
+        vis_thread.start()
+        
+        return jsonify({"status": "initialized", "model": model_path})
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+def update_visualization():
+    """定时更新可视化"""
+    while True:
+        if visualizer and predictor and is_initialized:
+            visualizer.update_display(predictor, len(sensor_data))
+        time.sleep(2)  # 每2秒更新一次
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    """获取系统状态"""
+    return jsonify({
+        "initialized": is_initialized,
+        "data_count": len(sensor_data),
+        "prediction_count": len(predictor.prediction_history) if predictor else 0
+    })
+
+@app.route('/save_dashboard', methods=['POST'])
+def save_dashboard():
+    """保存当前仪表板"""
+    if visualizer:
+        filename = f"dashboard_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        visualizer.fig.savefig(filename, dpi=300, bbox_inches='tight')
+        return jsonify({"status": "saved", "filename": filename})
+    return jsonify({"error": "Visualizer not initialized"}), 400
+
+if __name__ == '__main__':
+    print("实时预测系统启动中...")
+    print("使用 POST /initialize 初始化预测模型")
+    print("使用 POST /data 发送传感器数据")
+    app.run(host='0.0.0.0', port=5000, debug=False)
