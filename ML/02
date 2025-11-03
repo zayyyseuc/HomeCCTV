@@ -1,0 +1,264 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+import json
+import os
+from datetime import datetime
+import joblib
+
+class ActivityModelTrainer:
+    def __init__(self):
+        self.model = None
+        self.scaler = StandardScaler()
+        self.label_encoder = LabelEncoder()
+        self.history = None
+        
+    def load_data(self, filepath):
+        """加载数据集"""
+        print(f"Loading data from {filepath}")
+        self.df = pd.read_csv(filepath)
+        print(f"Data loaded: {len(self.df)} records")
+        
+        # 数据基本信息
+        print("\n数据概览:")
+        print(f"时间范围: {self.df['received_time'].min()} 到 {self.df['received_time'].max()}")
+        print(f"节点数量: {self.df['node_id'].nunique()}")
+        print(f"房间数量: {self.df['room'].nunique()}")
+        
+        return self.df
+    
+    def preprocess_data(self, time_window=5):
+        """数据预处理和特征工程"""
+        print("\n开始数据预处理...")
+        
+        # 按时间排序
+        self.df = self.df.sort_values('timestamp')
+        
+        # 创建时间序列特征
+        self.df['hour'] = pd.to_datetime(self.df['received_time']).dt.hour
+        self.df['day_part'] = self.df['hour'].apply(self._categorize_day_part)
+        
+        # 创建滑动窗口特征
+        features = self._create_time_window_features(time_window)
+        
+        # 创建标签（这里需要根据实际需求定义）
+        # 示例：根据位置和行为模式定义活动类型
+        labels = self._create_activity_labels()
+        
+        return features, labels
+    
+    def _categorize_day_part(self, hour):
+        """将小时转换为时间段"""
+        if 5 <= hour < 12:
+            return 0  # 早晨
+        elif 12 <= hour < 18:
+            return 1  # 下午
+        elif 18 <= hour < 22:
+            return 2  # 晚上
+        else:
+            return 3  # 深夜
+    
+    def _create_time_window_features(self, window_size):
+        """创建时间窗口特征"""
+        features = []
+        
+        # 按节点分组处理
+        for node_id, group in self.df.groupby('node_id'):
+            group = group.sort_values('timestamp')
+            
+            # 滑动窗口
+            for i in range(len(group) - window_size + 1):
+                window = group.iloc[i:i + window_size]
+                
+                # 提取窗口特征
+                feature_vector = self._extract_window_features(window)
+                features.append(feature_vector)
+        
+        return np.array(features)
+    
+    def _extract_window_features(self, window):
+        """从时间窗口提取特征"""
+        features = []
+        
+        # 基础统计特征
+        features.extend([
+            window['distance'].mean(),
+            window['distance'].std(),
+            window['angle'].mean(),
+            window['angle'].std(),
+            window['x'].mean(),
+            window['y'].mean(),
+            window['presence'].sum(),  # 存在时间总和
+            window['confidence'].mean()
+        ])
+        
+        # 运动特征
+        if len(window) > 1:
+            # 速度
+            dx = window['x'].diff().dropna()
+            dy = window['y'].diff().dropna()
+            dt = window['timestamp'].diff().dropna()
+            velocities = np.sqrt(dx**2 + dy**2) / dt
+            features.extend([velocities.mean(), velocities.std()])
+            
+            # 运动方向变化
+            if len(dx) > 1:
+                direction_changes = np.abs(np.diff(np.arctan2(dy, dx)))
+                features.append(direction_changes.mean())
+            else:
+                features.append(0)
+        else:
+            features.extend([0, 0, 0])
+        
+        # 房间转换特征
+        room_changes = (window['room'] != window['room'].shift()).sum()
+        features.append(room_changes)
+        
+        return np.array(features)
+    
+    def _create_activity_labels(self):
+        """创建活动标签（需要根据实际数据调整）"""
+        # 这里简化处理，实际中需要根据具体行为定义标签
+        # 示例：根据位置模式定义6种活动类型
+        
+        # 模拟标签生成（实际中需要真实标签）
+        n_samples = len(self.df) // 5  # 简化：每个窗口一个标签
+        labels = np.random.randint(0, 6, n_samples)
+        
+        return labels
+    
+    def create_model(self, input_dim, num_classes=6):
+        """创建神经网络模型"""
+        model = keras.Sequential([
+            keras.layers.Dense(128, activation='relu', input_shape=(input_dim,)),
+            keras.layers.Dropout(0.3),
+            keras.layers.Dense(64, activation='relu'),
+            keras.layers.Dropout(0.2),
+            keras.layers.Dense(32, activation='relu'),
+            keras.layers.Dense(num_classes, activation='softmax')
+        ])
+        
+        model.compile(
+            optimizer='adam',
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
+        return model
+    
+    def train(self, features, labels, test_size=0.2, epochs=100):
+        """训练模型"""
+        print("\n开始模型训练...")
+        
+        # 数据标准化
+        features_scaled = self.scaler.fit_transform(features)
+        
+        # 划分训练测试集
+        X_train, X_test, y_train, y_test = train_test_split(
+            features_scaled, labels, test_size=test_size, random_state=42
+        )
+        
+        # 创建模型
+        self.model = self.create_model(features.shape[1])
+        
+        # 训练模型
+        self.history = self.model.fit(
+            X_train, y_train,
+            epochs=epochs,
+            batch_size=32,
+            validation_data=(X_test, y_test),
+            verbose=1
+        )
+        
+        # 评估模型
+        test_loss, test_acc = self.model.evaluate(X_test, y_test, verbose=0)
+        print(f"\n测试集准确率: {test_acc:.4f}")
+        
+        return test_acc
+    
+    def save_model(self, model_dir='models'):
+        """保存模型和预处理工具"""
+        os.makedirs(model_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # 保存模型
+        model_path = os.path.join(model_dir, f'activity_model_{timestamp}.h5')
+        self.model.save(model_path)
+        
+        # 保存scaler
+        scaler_path = os.path.join(model_dir, f'scaler_{timestamp}.pkl')
+        joblib.dump(self.scaler, scaler_path)
+        
+        # 保存训练历史
+        history_path = os.path.join(model_dir, f'training_history_{timestamp}.json')
+        with open(history_path, 'w') as f:
+            json.dump(self.history.history, f)
+        
+        print(f"模型已保存到: {model_path}")
+        return model_path
+    
+    def plot_training_history(self):
+        """绘制训练历史"""
+        if self.history is None:
+            print("没有训练历史可显示")
+            return
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        
+        # 准确率曲线
+        ax1.plot(self.history.history['accuracy'], label='训练准确率')
+        ax1.plot(self.history.history['val_accuracy'], label='验证准确率')
+        ax1.set_title('模型准确率')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Accuracy')
+        ax1.legend()
+        
+        # 损失曲线
+        ax2.plot(self.history.history['loss'], label='训练损失')
+        ax2.plot(self.history.history['val_loss'], label='验证损失')
+        ax2.set_title('模型损失')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Loss')
+        ax2.legend()
+        
+        plt.tight_layout()
+        plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
+        plt.show()
+
+def main():
+    """主函数：训练流程示例"""
+    # 初始化训练器
+    trainer = ActivityModelTrainer()
+    
+    # 加载数据（替换为实际数据文件路径）
+    data_file = "datasets/sensor_data_20240520_120000.csv"  # 示例文件
+    df = trainer.load_data(data_file)
+    
+    # 数据预处理
+    features, labels = trainer.preprocess_data(time_window=10)
+    
+    print(f"特征维度: {features.shape}")
+    print(f"标签分布: {np.bincount(labels)}")
+    
+    # 训练模型
+    accuracy = trainer.train(features, labels, epochs=50)
+    
+    # 保存模型
+    model_path = trainer.save_model()
+    
+    # 显示训练历史
+    trainer.plot_training_history()
+    
+    print(f"\n训练完成!")
+    print(f"最终准确率: {accuracy:.4f}")
+    print(f"模型文件: {model_path}")
+
+if __name__ == "__main__":
+    main()
